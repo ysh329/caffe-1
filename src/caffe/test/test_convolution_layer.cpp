@@ -606,6 +606,8 @@ TYPED_TEST(CuDNNConvolutionLayerTest, TestSobelConvolutionCuDNN) {
     weights[i +  8] =  1;
   }
   layer->SetUp(this->blob_bottom_vec_, this->blob_top_vec_);
+  cudaDeviceSynchronize();
+  printf("first call\n");
   layer->Forward(this->blob_bottom_vec_, this->blob_top_vec_);
   // Compute Sobel G_x operator as separable 3 x 1 and 1 x 3 convolutions.
   // (1) the [1 2 1] column filter
@@ -633,6 +635,8 @@ TYPED_TEST(CuDNNConvolutionLayerTest, TestSobelConvolutionCuDNN) {
     weights_1[i +  2] = 1;
   }
   layer->SetUp(sep_blob_bottom_vec, sep_blob_top_vec);
+  cudaDeviceSynchronize();
+  printf("second call\n");
   layer->Forward(sep_blob_bottom_vec, sep_blob_top_vec);
   // (2) the [-1 0 1] row filter
   blob_sep->CopyFrom(*this->blob_top_2_, false, true);
@@ -655,6 +659,8 @@ TYPED_TEST(CuDNNConvolutionLayerTest, TestSobelConvolutionCuDNN) {
     weights_2[i +  2] =  1;
   }
   layer->SetUp(sep_blob_bottom_vec, sep_blob_top_vec);
+  cudaDeviceSynchronize();
+  printf("third call\n");
   layer->Forward(sep_blob_bottom_vec, sep_blob_top_vec);
   // Test equivalence of full and separable filters.
   const TypeParam* top_data = this->blob_top_->cpu_data();
