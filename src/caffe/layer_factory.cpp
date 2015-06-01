@@ -81,7 +81,6 @@ shared_ptr<Layer<Dtype> > GetLRNLayer(const LayerParameter& param) {
       return shared_ptr<Layer<Dtype> >(new LRNLayer<Dtype>(param));
     } else {
       // return shared_ptr<Layer<Dtype> >(new LRNLayer<Dtype>(param));
-      printf("cuDNN LRN layer being used\n");
       return shared_ptr<Layer<Dtype> >(new CuDNNLRNLayer<Dtype>(param));
     }
   } else {

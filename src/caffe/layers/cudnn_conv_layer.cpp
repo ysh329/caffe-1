@@ -98,6 +98,7 @@ void CuDNNConvolutionLayer<Dtype>::LayerSetUp(
     workspace_bwd_filter_sizes_[i] = 0;
   }
 
+  printf("bottom.size() in %s: %d\n", __FUNCTION__, (int)bottom.size());
   for (int g = 0; g < this->group_ * CUDNN_STREAMS_PER_GROUP; g++) {
     CUDA_CHECK(cudaStreamCreate(&stream_[g]));
     CUDNN_CHECK(cudnnCreate(&handle_[g]));
@@ -110,6 +111,7 @@ void CuDNNConvolutionLayer<Dtype>::LayerSetUp(
       * (this->channels_ / this->group_) * this->kernel_h_ * this->kernel_w_;
   bias_offset_ = (this->num_output_ / this->group_);
 
+  printf("channels: %d, %d\n", this->channels_, this->channels_ / this->group_);
   // Create filter descriptor.
   cudnn::createFilterDesc<Dtype>(&filter_desc_,
       this->num_output_ / this->group_, this->channels_ / this->group_,
@@ -144,6 +146,7 @@ void CuDNNConvolutionLayer<Dtype>::Reshape(
       * this->height_ * this->width_;
   top_offset_ = (this->num_output_ / this->group_)
       * this->height_out_ * this->width_out_;
+  printf("bottom.size() in %s: %d\n", __FUNCTION__, (int)bottom.size());
 
   // largest workspace needed for fwd & bwd convolutions
   size_t workspace_limit_bytes = this->kernel_h_ *
@@ -185,7 +188,6 @@ void CuDNNConvolutionLayer<Dtype>::Reshape(
     }
     //LOG(INFO) << "Forward Convolution using algo: " << (int)fwd_algo_[i];
 
-    size_t workspace_size_temp = 0;
     CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(handle_[0],
       bottom_descs_[i],
       filter_desc_,
@@ -245,7 +247,6 @@ void CuDNNConvolutionLayer<Dtype>::Reshape(
     total_workspace_bwd_filter = std::max(total_workspace_bwd_filter, workspace_bwd_filter_sizes_[i]);
 #endif
   }
-  // get the maximum workspace size over all convolutions
   size_t max_workspace = std::max(total_workspace_fwd, total_workspace_bwd_data);
   max_workspace = std::max(max_workspace, total_workspace_bwd_filter);
 
