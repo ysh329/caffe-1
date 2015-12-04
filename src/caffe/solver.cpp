@@ -215,6 +215,8 @@ void Solver<Dtype>::Step(int iters) {
     callbacks_[i]->on_start();
   }
 
+  net_->SetSolver(this);
+
   while (iter_ < stop_iter) {
     // zero-init the params
     net_->ClearParamDiffs();
@@ -274,6 +276,12 @@ void Solver<Dtype>::Step(int iters) {
     for (int i = 0; i < callbacks_.size(); ++i) {
       callbacks_[i]->allreduce();
     }
+
+    // Make sure all gradient exchanges have finished in per-level scheme
+    for (int i = 0; i < callbacks_.size(); ++i) {
+      callbacks_[i]->syncAllStreams();
+    }
+
     ApplyUpdate();
 
     // Increment the internal iter_ counter -- its value should always indicate

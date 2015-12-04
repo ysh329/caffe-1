@@ -70,10 +70,14 @@ class Solver {
 
   // Invoked at specific points during an iteration
   class Callback {
+   public:
+    virtual void allreduce(int param_id) = 0;
+    virtual void syncCommStream(int param_id) = 0;
    protected:
     virtual void on_start() = 0;
     virtual void allreduce() = 0;
     virtual void soft_barrier() = 0;
+    virtual void syncAllStreams() = 0;
 
     template <typename T>
     friend class Solver;

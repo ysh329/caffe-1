@@ -10,6 +10,7 @@ include $(CONFIG_FILE)
 # Rectify input parameters
 ifeq ($(CPU_ONLY),1)
   USE_CUDNN=0
+	USE_NCCL=0
 endif
 
 PROJECT_DIR=$(PWD)
@@ -323,6 +324,14 @@ ifeq ($(USE_CUDNN), 1)
 	INCLUDE_DIRS += ${CUDNN_DIR}/include
 	LIBRARY_DIRS += ${CUDNN_DIR}/install/cuda/lib64
 	COMMON_FLAGS += -DUSE_CUDNN
+endif
+
+# NCCL acceleration configuration
+ifeq ($(USE_NCCL), 1)
+	LIBRARIES += nccl
+	INCLUDE_DIRS += ${NCCL_DIR}/include
+	LIBRARY_DIRS += ${NCCL_DIR}/lib
+	COMMON_FLAGS += -DUSE_NCCL
 endif
 
 # configure IO libraries

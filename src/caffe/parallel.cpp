@@ -1,6 +1,5 @@
 #ifndef CPU_ONLY
 #include <cuda_runtime.h>
-#include "caffe/util/coll.h"
 #endif
 #include <glog/logging.h>
 #include <stdio.h>
@@ -19,8 +18,13 @@
 #include "caffe/parallel.hpp"
 #include "caffe/util/coll.h"
 #include "caffe/util/gpu_memory.hpp"
+#include "caffe/util/nccl.hpp"
+
 
 #define GRID_DIM 8
+
+#define PER_LEVEL_REDUCTION
+#define MULTIPLE_COMM_STREAMS
 
 namespace caffe {
 
@@ -95,7 +99,6 @@ GPUParams<Dtype>::GPUParams(shared_ptr<Solver<Dtype> > root_solver, int device)
   // Allocate device buffers
   CUDA_CHECK(cudaSetDevice(device));
   buffer_device_ = device;
-  // CUDA_CHECK(cudaMalloc(&data_, size_ * sizeof(Dtype)));
   gpu_memory::allocate(reinterpret_cast<void **>(&data_),
                            size_ * sizeof(Dtype));
 
@@ -104,7 +107,6 @@ GPUParams<Dtype>::GPUParams(shared_ptr<Solver<Dtype> > root_solver, int device)
       root_solver->net()->learnable_params();
   apply_buffers(net, data_, size_, copy);
 
-  // CUDA_CHECK(cudaMalloc(&diff_, size_ * sizeof(Dtype)));
   gpu_memory::allocate(reinterpret_cast<void **>(&diff_),
                            size_ * sizeof(Dtype));
   caffe_gpu_set(size_, Dtype(0), diff_);
@@ -178,21 +180,66 @@ P2PSync<Dtype>::P2PSync(shared_ptr<Solver<Dtype> > root_solver,
   this->configure(solver_.get());
   solver_->add_callback(this);
 
+#if defined(USE_NCCL) && defined(MULTIPLE_COMM_STREAMS)
+  size_t num_params = root_solver->net()->learnable_params().size();
+  nccl_comms_.resize(num_params);
+  comm_streams_.resize(num_params);
+
+  // create streams for all parameter reductions
+  for (int i = 0; i < num_params; ++i) {
+    CUDA_CHECK(cudaStreamCreateWithFlags(&comm_streams_[i],
+                                         cudaStreamNonBlocking));
+  }
+#else
+#if defined(USE_NCCL)
+  nccl_comms_.resize(1);
+#endif
+  comm_streams_.resize(1);
+  CUDA_CHECK(cudaStreamCreateWithFlags(&comm_streams_[0],
+                                       cudaStreamNonBlocking));
+#endif
+
   CUDA_CHECK(cudaSetDevice(initial_device));
+
 #else
   NO_GPU;
+#endif
+}
+
+#ifdef USE_NCCL
+template<typename Dtype>
+void P2PSync<Dtype>::setNCCLComm(ncclComm_t comm, int param_id = 0) {
+  this->nccl_comms_[param_id] = comm;
+}
+
+template<typename Dtype>
+ncclComm_t P2PSync<Dtype>::getNCCLComm(int param_id = 0) {
+#ifdef MULTIPLE_COMM_STREAMS
+  return this->nccl_comms_[param_id];
+#else
+  return this->nccl_comms_[0];
+#endif
+}
+#endif
+
+template<typename Dtype>
+cudaStream_t P2PSync<Dtype>::getCommStream(int param_id = 0) {
+#if defined(MULTIPLE_COMM_STREAMS) && defined(USE_NCCL) \
+                                   && defined(PER_LEVEL_REDUCTION)
+  return this->comm_streams_[param_id];
+#else
+  return this->comm_streams_[0];
 #endif
 }
 
 template<typename Dtype>
 void P2PSync<Dtype>::SetupP2PAccess() {
 #ifndef CPU_ONLY
+#ifndef USE_NCCL
   int initial_device;
   CUDA_CHECK(cudaGetDevice(&initial_device));
   const int self = solver_->param().device_id();
   CUDA_CHECK(cudaSetDevice(self));
-
-  cudaStreamCreateWithFlags(&cuda_stream_, cudaStreamNonBlocking);
 
   gpu_memory::allocate(reinterpret_cast<void **>(&parent_grads_),
                        size_ * sizeof(Dtype));
@@ -221,6 +268,7 @@ void P2PSync<Dtype>::SetupP2PAccess() {
     }
   }
   CUDA_CHECK(cudaSetDevice(initial_device));
+#endif
 #else
   NO_GPU;
 #endif
@@ -234,8 +282,15 @@ P2PSync<Dtype>::~P2PSync() {
   const int self = solver_->param().device_id();
   CUDA_CHECK(cudaSetDevice(self));
 
-  cudaStreamDestroy(cuda_stream_);
+  for (int i = 0; i < comm_streams_.size(); ++i) {
+    cudaStreamDestroy(comm_streams_[i]);
+  }
 
+#ifdef USE_NCCL
+  for (int i = 0; i < nccl_comms_.size(); ++i) {
+    ncclCommDestroy(nccl_comms_[i]);
+  }
+#else
   gpu_memory::deallocate(parent_grads_);
   gpu_memory::deallocate(offset_);
 
@@ -251,6 +306,7 @@ P2PSync<Dtype>::~P2PSync() {
       if (child_ != parent_) CUDA_CHECK(cudaDeviceDisablePeerAccess(peer));
     }
   }
+#endif
 
   CUDA_CHECK(cudaSetDevice(initial_device));
 #endif
@@ -274,17 +330,26 @@ void P2PSync<Dtype>::InternalThreadEntry() {
 
 template<typename Dtype>
 void P2PSync<Dtype>::soft_barrier() {
+#ifndef CPU_ONLY
   // CPU barrier to avoid busy-polling on the GPU.
   CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
   if (rank_ != nranks_ - 1) queue_.pop();
   if (rank_) parent_->queue_.push(this);
   if (rank_) queue_.pop();
   if (rank_ != nranks_ - 1) child_->queue_.push(this);
+#endif
 }
 
 template<typename Dtype>
 void P2PSync<Dtype>::on_start() {
 #ifndef CPU_ONLY
+#ifdef USE_NCCL
+  CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
+  NCCL_CHECK(ncclBcast(
+        data_, size_, nccl::dataType<Dtype>::type,
+        0, getNCCLComm(), getCommStream()));
+  CUDA_CHECK(cudaStreamSynchronize(getCommStream()));
+#else
   CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
   multi_gpu_pipeline_bcast(
     rank_ ? offset_ : NULL,
@@ -293,24 +358,36 @@ void P2PSync<Dtype>::on_start() {
     ((rank_ != nranks_ - 1) && child_peer_access_) ? child_->data_ : NULL,
     size_,
     GRID_DIM,
-    cuda_stream_);
+    getCommStream());
   if ((rank_ != nranks_ - 1) && !child_peer_access_) {
     CUDA_CHECK(cudaMemcpyAsync(child_->data_, data_,
-          size_ * sizeof(Dtype), cudaMemcpyDeviceToDevice, cuda_stream_));
+          size_ * sizeof(Dtype), cudaMemcpyDeviceToDevice, getCommStream()));
     for (int i = 0; i< GRID_DIM; i++) {
       CUDA_CHECK(cudaMemcpyAsync(child_->offset_+i, &size_,
-            sizeof(int), cudaMemcpyHostToDevice, cuda_stream_));
+            sizeof(int), cudaMemcpyHostToDevice, getCommStream()));
     }
   }
-  CUDA_CHECK(cudaStreamSynchronize(cuda_stream_));
+  CUDA_CHECK(cudaStreamSynchronize(getCommStream()));
   caffe_gpu_memset(GRID_DIM*sizeof(int), -1, offset_);
+#endif
 #endif
 }
 
 template<typename Dtype>
 void P2PSync<Dtype>::allreduce() {
-  bar->wait();
 #ifndef CPU_ONLY
+
+#ifndef PER_LEVEL_REDUCTION
+  bar->wait();
+#ifdef USE_NCCL
+  CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
+  NCCL_CHECK(ncclAllReduce(
+        diff_, diff_, size_, nccl::dataType<Dtype>::type,
+        ncclSum, getNCCLComm(), getCommStream()));
+  caffe_gpu_scal(size_, (Dtype)1.0 / Caffe::solver_count(),
+                 diff_, getCommStream());
+  CUDA_CHECK(cudaStreamSynchronize(getCommStream()));
+#else
   CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
   multi_gpu_ring_sum(
     rank_,
@@ -324,8 +401,53 @@ void P2PSync<Dtype>::allreduce() {
     (Dtype)1.0 / Caffe::solver_count(),  // Mult factor
     size_,
     GRID_DIM,
-    cuda_stream_);
-  CUDA_CHECK(cudaStreamSynchronize(cuda_stream_));
+    getCommStream());
+  CUDA_CHECK(cudaStreamSynchronize(getCommStream());
+#endif  // USE_NCCL
+
+#endif  // PER_LEVEL_REDUCTION
+
+#endif  // CPU_ONLY
+}
+
+template<typename Dtype>
+void P2PSync<Dtype>::allreduce(int param_id) {
+#ifndef CPU_ONLY
+
+#if defined(USE_NCCL) && defined(PER_LEVEL_REDUCTION)
+  bar->wait();
+
+  const vector<shared_ptr<Blob<Dtype> > >& params = solver_->net()->params();
+
+  NCCL_CHECK(ncclAllReduce(params[param_id]->gpu_diff(),
+                           params[param_id]->mutable_gpu_diff(),
+                           params[param_id]->count(),
+                           nccl::dataType<Dtype>::type,
+                           ncclSum,
+                           getNCCLComm(param_id),
+                           getCommStream(param_id)) );
+  caffe_gpu_scal(params[param_id]->count(), (Dtype)1.0 / Caffe::solver_count(),
+                 params[param_id]->mutable_gpu_diff(), getCommStream(param_id));
+#endif  // USE_NCCL && PER_LEVEL_REDUCTION
+
+#endif  // CPU_ONLY
+}
+
+template <typename Dtype>
+void P2PSync<Dtype>::syncAllStreams() {
+  bar->wait();
+  for (int i = 0; i < comm_streams_.size(); ++i) {
+    cudaStreamSynchronize(comm_streams_[i]);
+  }
+}
+
+template <typename Dtype>
+void P2PSync<Dtype>::syncCommStream(int param_id) {
+#if defined(USE_NCCL) && defined(MULTIPLE_COMM_STREAMS) \
+                      && defined(PER_LEVEL_REDUCTION)
+  CUDA_CHECK(cudaStreamSynchronize(comm_streams_[param_id]));
+#else
+  CUDA_CHECK(cudaStreamSynchronize(comm_streams_[0]));
 #endif
 }
 
@@ -334,7 +456,7 @@ void P2PSync<Dtype>::run(shared_ptr<Solver<Dtype> > root,
                          const vector<int>& gpus) {
   int nranks = gpus.size();
   bar = new boost::barrier(nranks);
-  SolverParameter param(root->param());
+  SolverParameter param(this->params_);
   vector<shared_ptr<P2PSync<Dtype> > > syncs(nranks);
 
   for (int i = 1; i < nranks; i++) {
@@ -352,10 +474,37 @@ void P2PSync<Dtype>::run(shared_ptr<Solver<Dtype> > root,
   this->parent_ = syncs[syncs.size()-1].get();
   syncs[syncs.size()-1]->child_ = this;
 
+#ifdef USE_NCCL
+  ncclComm_t *comms = new ncclComm_t[nranks];
+#ifdef MULTIPLE_COMM_STREAMS
+  // initialize communicators for each set of parameters
+  size_t num_params = root->net()->learnable_params().size();
+
+  for (int param_id = 0; param_id < num_params; ++param_id) {
+    NCCL_CHECK(ncclCommInitAll(comms, nranks, NULL));
+
+    this->setNCCLComm(comms[0], param_id);
+
+    for (int i = 1; i < nranks; ++i) {
+      syncs[i]->setNCCLComm(comms[i], param_id);
+    }
+  }
+#else
+  NCCL_CHECK(ncclCommInitAll(comms, nranks, NULL));
+
+  this->setNCCLComm(comms[0]);
+
+  for (int i = 1; i < nranks; ++i) {
+    syncs[i]->setNCCLComm(comms[i]);
+  }
+#endif
+  delete [] comms;
+#else
   this->SetupP2PAccess();
   for (int i = 1; i < syncs.size(); ++i) {
     syncs[i]->SetupP2PAccess();
   }
+#endif
 
   LOG(INFO)<< "Starting Optimization";
 
