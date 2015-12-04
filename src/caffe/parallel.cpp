@@ -17,6 +17,7 @@
 #include "boost/thread/latch.hpp"
 #include "caffe/caffe.hpp"
 #include "caffe/parallel.hpp"
+#include "caffe/util/coll.h"
 #include "caffe/util/gpu_memory.hpp"
 
 #define GRID_DIM 8
@@ -273,14 +274,12 @@ void P2PSync<Dtype>::InternalThreadEntry() {
 
 template<typename Dtype>
 void P2PSync<Dtype>::soft_barrier() {
-#ifndef CPU_ONLY
   // CPU barrier to avoid busy-polling on the GPU.
   CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
   if (rank_ != nranks_ - 1) queue_.pop();
   if (rank_) parent_->queue_.push(this);
   if (rank_) queue_.pop();
   if (rank_ != nranks_ - 1) child_->queue_.push(this);
-#endif
 }
 
 template<typename Dtype>
@@ -335,7 +334,7 @@ void P2PSync<Dtype>::run(shared_ptr<Solver<Dtype> > root,
                          const vector<int>& gpus) {
   int nranks = gpus.size();
   bar = new boost::barrier(nranks);
-  SolverParameter param(this->params_);
+  SolverParameter param(root->param());
   vector<shared_ptr<P2PSync<Dtype> > > syncs(nranks);
 
   for (int i = 1; i < nranks; i++) {
