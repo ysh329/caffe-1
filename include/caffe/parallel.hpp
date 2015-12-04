@@ -14,6 +14,10 @@
 #include "caffe/syncedmem.hpp"
 #include "caffe/util/blocking_queue.hpp"
 
+#ifdef USE_NCCL
+#include "nccl.h"
+#endif
+
 namespace caffe {
 
 // Represents a net parameters. Once a net is created, its parameter buffers can
@@ -100,6 +104,11 @@ class P2PSync : public GPUParams<Dtype>, public Solver<Dtype>::Callback,
   // Divide the batch size by the number of solvers
   static void divide_batch_size(NetParameter* net);
 
+#ifdef USE_NCCL
+  // set the NCCL communicator
+  void setNCCLComm(ncclComm_t comm);
+#endif
+
  protected:
   void SetupP2PAccess();
 
@@ -113,17 +122,23 @@ class P2PSync : public GPUParams<Dtype>, public Solver<Dtype>::Callback,
   const int nranks_;
   P2PSync<Dtype>* parent_;
   P2PSync<Dtype>* child_;
+#ifndef USE_NCCL
   int parent_peer_access_;
   int child_peer_access_;
+  Dtype* parent_grads_;
+  int *offset_;
+#endif
   BlockingQueue<P2PSync<Dtype>*> queue_;
   const int initial_iter_;
-  Dtype* parent_grads_;
 #ifndef CPU_ONLY
   cudaStream_t cuda_stream_;
 #endif
-  int *offset_;
   shared_ptr<Solver<Dtype> > solver_;
   const SolverParameter& params_;
+
+#ifdef USE_NCCL
+  ncclComm_t nccl_comm_;
+#endif
 
   using Params<Dtype>::size_;
   using Params<Dtype>::data_;

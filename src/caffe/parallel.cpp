@@ -1,6 +1,5 @@
 #ifndef CPU_ONLY
 #include <cuda_runtime.h>
-#include "caffe/util/coll.h"
 #endif
 #include <glog/logging.h>
 #include <stdio.h>
@@ -19,6 +18,8 @@
 #include "caffe/parallel.hpp"
 #include "caffe/util/coll.h"
 #include "caffe/util/gpu_memory.hpp"
+#include "caffe/util/nccl.hpp"
+
 
 #define GRID_DIM 8
 
@@ -178,15 +179,25 @@ P2PSync<Dtype>::P2PSync(shared_ptr<Solver<Dtype> > root_solver,
   this->configure(solver_.get());
   solver_->add_callback(this);
 
+  CUDA_CHECK(cudaStreamCreate(&cuda_stream_));
   CUDA_CHECK(cudaSetDevice(initial_device));
+
 #else
   NO_GPU;
 #endif
 }
 
+#ifdef USE_NCCL
+template<typename Dtype>
+void P2PSync<Dtype>::setNCCLComm(ncclComm_t comm) {
+  this->nccl_comm_ = comm;
+}
+#endif
+
 template<typename Dtype>
 void P2PSync<Dtype>::SetupP2PAccess() {
 #ifndef CPU_ONLY
+#ifndef USE_NCCL
   int initial_device;
   CUDA_CHECK(cudaGetDevice(&initial_device));
   const int self = solver_->param().device_id();
@@ -221,6 +232,7 @@ void P2PSync<Dtype>::SetupP2PAccess() {
     }
   }
   CUDA_CHECK(cudaSetDevice(initial_device));
+#endif
 #else
   NO_GPU;
 #endif
@@ -236,6 +248,9 @@ P2PSync<Dtype>::~P2PSync() {
 
   cudaStreamDestroy(cuda_stream_);
 
+#ifdef USE_NCCL
+  ncclCommDestroy(nccl_comm_);
+#else
   gpu_memory::deallocate(parent_grads_);
   gpu_memory::deallocate(offset_);
 
@@ -251,6 +266,7 @@ P2PSync<Dtype>::~P2PSync() {
       if (child_ != parent_) CUDA_CHECK(cudaDeviceDisablePeerAccess(peer));
     }
   }
+#endif
 
   CUDA_CHECK(cudaSetDevice(initial_device));
 #endif
@@ -274,17 +290,26 @@ void P2PSync<Dtype>::InternalThreadEntry() {
 
 template<typename Dtype>
 void P2PSync<Dtype>::soft_barrier() {
+#ifndef CPU_ONLY
   // CPU barrier to avoid busy-polling on the GPU.
   CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
   if (rank_ != nranks_ - 1) queue_.pop();
   if (rank_) parent_->queue_.push(this);
   if (rank_) queue_.pop();
   if (rank_ != nranks_ - 1) child_->queue_.push(this);
+#endif
 }
 
 template<typename Dtype>
 void P2PSync<Dtype>::on_start() {
 #ifndef CPU_ONLY
+#ifdef USE_NCCL
+  CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
+  NCCL_CHECK(ncclBcast(
+        data_, size_, nccl::dataType<Dtype>::type,
+        0, nccl_comm_, cuda_stream_));
+  CUDA_CHECK(cudaStreamSynchronize(cuda_stream_));
+#else
   CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
   multi_gpu_pipeline_bcast(
     rank_ ? offset_ : NULL,
@@ -305,12 +330,21 @@ void P2PSync<Dtype>::on_start() {
   CUDA_CHECK(cudaStreamSynchronize(cuda_stream_));
   caffe_gpu_memset(GRID_DIM*sizeof(int), -1, offset_);
 #endif
+#endif
 }
 
 template<typename Dtype>
 void P2PSync<Dtype>::allreduce() {
   bar->wait();
 #ifndef CPU_ONLY
+#ifdef USE_NCCL
+  NCCL_CHECK(ncclAllReduce(
+        diff_, diff_, size_, nccl::dataType<Dtype>::type,
+        ncclSum, nccl_comm_, cuda_stream_));
+  caffe_gpu_scal(size_, (Dtype)1.0 / Caffe::solver_count(),
+                 diff_, cuda_stream_);
+  CUDA_CHECK(cudaStreamSynchronize(cuda_stream_));
+#else
   CUDA_CHECK(cudaStreamSynchronize(cudaStreamDefault));
   multi_gpu_ring_sum(
     rank_,
@@ -326,6 +360,7 @@ void P2PSync<Dtype>::allreduce() {
     GRID_DIM,
     cuda_stream_);
   CUDA_CHECK(cudaStreamSynchronize(cuda_stream_));
+#endif  // USE_NCCL
 #endif
 }
 
@@ -334,7 +369,7 @@ void P2PSync<Dtype>::run(shared_ptr<Solver<Dtype> > root,
                          const vector<int>& gpus) {
   int nranks = gpus.size();
   bar = new boost::barrier(nranks);
-  SolverParameter param(root->param());
+  SolverParameter param(this->params_);
   vector<shared_ptr<P2PSync<Dtype> > > syncs(nranks);
 
   for (int i = 1; i < nranks; i++) {
@@ -352,10 +387,21 @@ void P2PSync<Dtype>::run(shared_ptr<Solver<Dtype> > root,
   this->parent_ = syncs[syncs.size()-1].get();
   syncs[syncs.size()-1]->child_ = this;
 
+#ifdef USE_NCCL
+  ncclComm_t *comms = new ncclComm_t[nranks];
+  NCCL_CHECK(ncclCommInitAll(comms, nranks, NULL));
+
+  this->setNCCLComm(comms[0]);
+
+  for (int i = 1; i < nranks; ++i) {
+    syncs[i]->setNCCLComm(comms[i]);
+  }
+#else
   this->SetupP2PAccess();
   for (int i = 1; i < syncs.size(); ++i) {
     syncs[i]->SetupP2PAccess();
   }
+#endif
 
   LOG(INFO)<< "Starting Optimization";
 
