@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "caffe/net.hpp"
+#include "caffe/util/benchmark.hpp"
 
 namespace caffe {
 
@@ -125,6 +126,10 @@ class Solver {
 
   // True iff a request to stop early was received.
   bool requested_early_exit_;
+
+  // Timing information
+  Timer iteration_timer_;
+  float iterations_last_;
 
   DISABLE_COPY_AND_ASSIGN(Solver);
 };
