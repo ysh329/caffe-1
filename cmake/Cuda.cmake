@@ -189,6 +189,30 @@ function(detect_cuDNN)
 endfunction()
 
 ################################################################################################
+# Short command for NCCL detection. 
+# Usage:
+#   detect_NCCL()
+function(detect_NCCL)
+  set(NCCL_ROOT "" CACHE PATH "NCCL root folder")
+
+  find_path(NCCL_INCLUDE nccl.h
+    PATHS ${NCCL_ROOT} "${NCCL_ROOT}/build/include" "${NCCL_ROOT}/include" $ENV{NCCL_ROOT} ${CUDA_TOOLKIT_INCLUDE}
+    DOC "Path to NCCL include directory." )
+
+  get_filename_component(__libpath_hist ${CUDA_CUDART_LIBRARY} PATH)
+  find_library(NCCL_LIBRARY NAMES libnccl.so # libcudnn_static.a
+    PATHS ${NCCL_ROOT} "${NCCL_ROOT}/build/lib" "${NCCL_ROOT}/lib" $ENV{NCCL_ROOT} ${NCCL_INCLUDE} ${__libpath_hist}
+                             DOC "Path to NCCL library.")
+
+  if(NCCL_INCLUDE AND NCCL_LIBRARY)
+    set(HAVE_NCCL  TRUE PARENT_SCOPE)
+    set(NCCL_FOUND TRUE PARENT_SCOPE)
+
+    mark_as_advanced(NCCL_INCLUDE NCCL_LIBRARY NCCL_ROOT)
+    message(STATUS "Found NCCL (include: ${NCCL_INCLUDE}, library: ${NCCL_LIBRARY})")
+  endif()
+endfunction()
+################################################################################################
 ###  Non macro section
 ################################################################################################
 
@@ -212,6 +236,16 @@ if(USE_CUDNN)
     add_definitions(-DUSE_CUDNN)
     include_directories(SYSTEM ${CUDNN_INCLUDE})
     list(APPEND Caffe_LINKER_LIBS ${CUDNN_LIBRARY})
+  endif()
+endif()
+
+# NCCL detection
+if(USE_NCCL)
+  detect_NCCL()
+  if(HAVE_NCCL)
+    add_definitions(-DUSE_NCCL)
+    include_directories(SYSTEM ${NCCL_INCLUDE})
+    list(APPEND Caffe_LINKER_LIBS ${NCCL_LIBRARY})
   endif()
 endif()
 
