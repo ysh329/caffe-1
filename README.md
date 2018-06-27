@@ -1,3 +1,11 @@
+# How to build using cuda6.5+cudnnv2
+
+```shell
+make
+```
+
+This repo is from `slayton/caffe`. More detailed info: [cuda - Issues with compiling Caffe with cuDNN - Stack Overflow](https://stackoverflow.com/questions/27987691/issues-with-compiling-caffe-with-cudnn).
+
 # Caffe
 
 Caffe is a deep learning framework made with expression, speed, and modularity in mind.
