@@ -1,11 +1,10 @@
 # How to build using cuda6.5+cudnnv2
 
 ```shell
-cuda - Issues with compiling Caffe with cuDNN - Stack Overflow
-https://stackoverflow.com/questions/27987691/issues-with-compiling-caffe-with-cudnn
+make
 ```
 
-This repo is from `slayton/caffe`. More detailed info: 
+This repo is from `slayton/caffe`. More detailed info: [cuda - Issues with compiling Caffe with cuDNN - Stack Overflow](https://stackoverflow.com/questions/27987691/issues-with-compiling-caffe-with-cudnn).
 
 # Caffe
 
